@@ -1,18 +1,11 @@
 import { config } from "../config.js";
-import { SYSTEM_PROMPT } from "./personality.js";
+import { buildSystemPrompt } from "./personality.js";
 
 export interface ChatTurn {
   role: "user" | "assistant";
   content: string;
 }
 
-/**
- * Calls Gemini with Pholio's system prompt + recent conversation history.
- * NOTE: double-check `GEMINI_MODEL` in your .env against whatever model
- * names are current in Google AI Studio when you set this up — model
- * names change over time and this file doesn't hardcode a guess beyond
- * the .env.example default.
- */
 export async function askPholio(history: ChatTurn[], newUserMessage: string): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.gemini.model}:generateContent?key=${config.gemini.apiKey}`;
 
@@ -28,7 +21,7 @@ export async function askPholio(history: ChatTurn[], newUserMessage: string): Pr
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      systemInstruction: { parts: [{ text: buildSystemPrompt() }] },
       contents,
     }),
   });
