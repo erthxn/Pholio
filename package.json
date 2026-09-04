@@ -1,0 +1,24 @@
+{
+  "name": "pholio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pholio — an iMessage agent (built on Photon/spectrum-ts) that reads on-chain wallets across ETH, Base, Polygon, Robinhood Chain, HyperEVM, Solana, TON, Bitcoin and Sui, and gives a plain-English trading-style read.",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "db:init": "node --loader tsx db/init.ts"
+  },
+  "dependencies": {
+    "spectrum-ts": "latest",
+    "pg": "^8.11.5",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "tsx": "^4.16.2",
+    "@types/node": "^20.14.9",
+    "@types/pg": "^8.11.6"
+  }
+}
