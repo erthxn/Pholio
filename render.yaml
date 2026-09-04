@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: pholio
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: SPECTRUM_PROJECT_ID
+        sync: false
+      - key: SPECTRUM_PROJECT_SECRET
+        sync: false
+      - key: BLOCKSCOUT_API_KEY
+        sync: false
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: TONAPI_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: DATABASE_URL
+        sync: false
