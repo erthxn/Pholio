@@ -1,6 +1,6 @@
 # Pholio
 
-An iMessage agent, built on [Photon](https://photon.codes), that reads
+An iMessage agent, built on [Photon](https://photon.codes) by [Majek Ay](https://x.com/erthxn), that reads
 on-chain wallets Ethereum, Base, Polygon, Robinhood Chain, HyperEVM,
 Solana, TON, Bitcoin, and Sui and returns a plain English trading style
 read. No slash commands: address in, read out, in plain conversation.
@@ -85,7 +85,7 @@ Options, roughly in order of least setup effort for a process like this:
   environment variables, deploy.
 - **Fly.io** — similar shape, slightly more configuration (a `fly.toml`),
   useful if you want more control over region/scaling later.
-- **A plain VPS** (e.g. a small droplet) with `pm2` or a systemd service
+- **A plain VPS** — (e.g. a small droplet) with `pm2` or a systemd service
   keeping `npm start` alive  more setup, more control.
 
 Not a fit: Cloudflare Workers or other strict edge/browser style runtimes 
