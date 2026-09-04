@@ -6,6 +6,8 @@
 import { Spectrum, text, attachment } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { config } from "./config.js";
+import { startHealthServer } from "./server.js";
+import { loadProjectKnowledge } from "./ai/knowledge.js";
 import { ensureUser, isFirstEverMessage, saveMessage, getRecentMessages, wipeMemory } from "./db.js";
 import { buildWelcome, STICKERS } from "./handlers/onboarding.js";
 import { detectIntent } from "./handlers/intent.js";
@@ -13,11 +15,15 @@ import { startScan, runScan } from "./handlers/scan.js";
 import { askPholio } from "./ai/gemini.js";
 import type { ChainKey } from "./chains/types.js";
 
+startHealthServer();
+await loadProjectKnowledge();
+
 const app = await Spectrum({
   projectId: config.spectrum.projectId,
   projectSecret: config.spectrum.projectSecret,
   providers: [imessage.config()],
 });
+
 
 // Waiting-on-a-chain-choice state, keyed by our internal user id. In-memory
 // is fine for a single-process deploy; move to the DB if you ever run more
