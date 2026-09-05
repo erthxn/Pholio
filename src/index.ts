@@ -49,7 +49,11 @@ const MAX_CHAIN_ATTEMPTS = 2;
 const quietSpaces = new Set<string>();
 
 /** Every outgoing text bubble goes through here: sanitized, sent, then saved to history. */
-async function sendReply(space: { send: (c: unknown) => Promise<unknown> }, user: StoredUser, content: string): Promise<void> {
+// `space` is typed as `any` here rather than a hand-rolled shape: space.send
+// is a real overloaded function (ContentInput | ReactionBuilder | ...), and
+// a narrower `(c: unknown) => Promise<unknown>` doesn't structurally match
+// that, TypeScript rejects it as a contravariant parameter mismatch.
+async function sendReply(space: any, user: StoredUser, content: string): Promise<void> {
   const clean = sanitizeForIMessage(content);
   await space.send(text(clean));
   await saveMessage(user.id, "assistant", clean);
@@ -62,7 +66,7 @@ async function sendReply(space: { send: (c: unknown) => Promise<unknown> }, user
  * person answers.
  */
 async function processScanQueue(
-  space: { send: (c: unknown) => Promise<unknown> },
+  space: any,
   user: StoredUser,
   addresses: string[]
 ): Promise<void> {
