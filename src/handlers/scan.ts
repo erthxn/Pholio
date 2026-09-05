@@ -14,6 +14,9 @@ export type ScanOutcome =
   | { kind: "result"; reply: string; chain: ChainKey; raw: unknown }
   | { kind: "failed"; reply: string };
 
+/** The subset of ScanOutcome that runScan() can actually produce — it never returns needs-chain-choice. */
+type RunScanOutcome = Extract<ScanOutcome, { kind: "result" } | { kind: "failed" }>;
+
 async function fetchByChain(chain: ChainKey, address: string): Promise<ScanResult> {
   switch (chain) {
     case "solana":
@@ -38,7 +41,7 @@ export async function runScan(params: {
   userId: number;
   address: string;
   chain: ChainKey;
-}): Promise<ScanOutcome> {
+}): Promise<RunScanOutcome> {
   const result = await fetchByChain(params.chain, params.address);
 
   if (!result.ok) {
