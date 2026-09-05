@@ -17,6 +17,14 @@ const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
 const SUI_RE = /^0x[a-fA-F0-9]{64}$/; // Sui = 32-byte address, 66 chars total incl. 0x
 const SOLANA_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/; // base58, no 0/O/I/l
 const TON_RE = /^(EQ|UQ|kQ|0Q)[A-Za-z0-9_-]{46}$/; // friendly-form TON addresses
+// Bug #6: TON DNS domains ("spinmipayment.ton") are a completely different
+// string shape from a friendly-form address and never matched TON_RE. That
+// meant classifyAddress() called them "none" and a message like "scan
+// spinmipayment.ton" fell all the way through to plain chat, no real lookup
+// ever happened, and the model quietly invented a fake-sounding scan. This
+// recognizes the domain shape as a real address candidate; tonapi.ts is what
+// actually resolves it to a wallet address before hitting the account APIs.
+export const TON_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,124}[a-z0-9])?\.ton$/i;
 const BTC_RE = /^(1[a-km-zA-HJ-NP-Z1-9]{25,34}|3[a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-z0-9]{25,90})$/;
 
 export type Classification =
@@ -35,6 +43,7 @@ export function classifyAddress(raw: string): Classification {
 
   if (BTC_RE.test(value)) return { kind: "unique", chain: "bitcoin" };
   if (TON_RE.test(value)) return { kind: "unique", chain: "ton" };
+  if (TON_DOMAIN_RE.test(value)) return { kind: "unique", chain: "ton" };
   if (SUI_RE.test(value)) return { kind: "unique", chain: "sui" };
   if (EVM_RE.test(value)) return { kind: "evm-ambiguous", candidates: EVM_CANDIDATE_CHAINS };
   // Solana check last — base58 is a loose format and can false-positive
