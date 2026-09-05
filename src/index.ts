@@ -4,7 +4,7 @@
 // [space, message] tuples; you narrow message.content.type and act on it
 // via space.send(...) or message.reply(...).
 import fs from "node:fs/promises";
-import { Spectrum, text, attachment } from "spectrum-ts";
+import { Spectrum, text, attachment, Emoji } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { config } from "./config.js";
 import { startHealthServer } from "./server.js";
@@ -86,8 +86,13 @@ async function processScanQueue(
     }
 
     if (scanState.kind === "unique") {
+      await sendReply(space, user, `Scanning ${address} now.`);
       await space.send(attachment(STICKERS.readingData));
       const outcome = await runScan({ userId: user.id, address, chain: scanState.chain });
+      if (outcome.kind === "result" && outcome.chartFilePath) {
+        await space.send(attachment(outcome.chartFilePath));
+        await fs.rm(outcome.chartFilePath, { force: true }).catch(() => {});
+      }
       await sendReply(space, user, outcome.reply);
       continue;
     }
@@ -104,6 +109,24 @@ for await (const [space, message] of app.messages) {
 
   const incomingText = message.content.text;
   const senderId = message.sender?.id ?? space.id; // fall back to space id if the platform can't attribute a sender
+  console.log(`[message] from ${senderId} in space ${space.id}: ${incomingText}`);
+
+  // Mark it read and drop a quick reaction so there's visible acknowledgement
+  // in the thread the moment we've got the message, before any of the
+  // (possibly slow) scan/chart/AI work below even starts. Both are
+  // fire-and-forget and no-op silently on platforms that don't support them,
+  // per Photon's Read / Reactions docs, so a failure here never blocks a
+  // reply from going out.
+  try {
+    await message.read();
+  } catch (err) {
+    console.error("Error marking message read:", err);
+  }
+  try {
+    await message.react(Emoji.like);
+  } catch (err) {
+    console.error("Error reacting to message:", err);
+  }
 
   let user: StoredUser;
   let firstTime: boolean;
@@ -141,8 +164,13 @@ for await (const [space, message] of app.messages) {
 
         if (chosen) {
           pendingChainChoice.delete(user.id);
+          await sendReply(space, user, `Scanning ${pending.address} now.`);
           await space.send(attachment(STICKERS.readingData));
           const outcome = await runScan({ userId: user.id, address: pending.address, chain: chosen });
+          if (outcome.kind === "result" && outcome.chartFilePath) {
+            await space.send(attachment(outcome.chartFilePath));
+            await fs.rm(outcome.chartFilePath, { force: true }).catch(() => {});
+          }
           await sendReply(space, user, outcome.reply);
           if (pending.remaining.length > 0) {
             await processScanQueue(space, user, pending.remaining);
@@ -191,12 +219,16 @@ for await (const [space, message] of app.messages) {
       }
 
       if (intent.kind === "chart") {
+        console.log(`[chart] building price chart for ${intent.address}`);
+        await sendReply(space, user, `Scanning ${intent.address} now.`);
         await space.send(attachment(STICKERS.readingData));
         const outcome = await buildChartOutcome(intent.address);
         if (outcome.kind === "failed") {
+          console.error(`[chart] failed for ${intent.address}: ${outcome.reply}`);
           await sendReply(space, user, outcome.reply);
           return;
         }
+        console.log(`[chart] built chart for ${intent.address}`);
         await space.send(attachment(outcome.filePath));
         await sendReply(space, user, outcome.caption);
         await fs.rm(outcome.filePath, { force: true }).catch(() => {});
@@ -204,6 +236,7 @@ for await (const [space, message] of app.messages) {
       }
 
       // Ordinary conversation — answer with recent memory as context.
+      console.log(`[chat] no address/command detected, answering conversationally`);
       const history = await getRecentMessages(user.id, 20);
       const reply = await askPholio(
         history.slice(0, -1).map((m) => ({ role: m.role, content: m.content })),
