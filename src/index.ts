@@ -8,7 +8,7 @@ import { imessage } from "spectrum-ts/providers/imessage";
 import { config } from "./config.js";
 import { startHealthServer } from "./server.js";
 import { loadProjectKnowledge } from "./ai/knowledge.js";
-import { ensureUser, isFirstEverMessage, saveMessage, getRecentMessages, wipeMemory, type StoredUser } from "./db.js";
+import { ensureSchema, ensureUser, isFirstEverMessage, saveMessage, getRecentMessages, wipeMemory, type StoredUser } from "./db.js";
 import { buildWelcome, STICKERS } from "./handlers/onboarding.js";
 import { detectIntent } from "./handlers/intent.js";
 import { startScan, runScan } from "./handlers/scan.js";
@@ -16,6 +16,7 @@ import { askPholio } from "./ai/gemini.js";
 import type { ChainKey } from "./chains/types.js";
 
 startHealthServer();
+await ensureSchema();
 await loadProjectKnowledge();
 
 const app = await Spectrum({
