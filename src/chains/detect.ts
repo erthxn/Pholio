@@ -46,15 +46,34 @@ export function classifyAddress(raw: string): Classification {
 }
 
 /**
- * Pulls a plausible address-looking token out of a free-text message.
- * This is intentionally loose — the LLM intent layer decides whether the
- * user actually wants a scan; this just finds the candidate string.
+ * Bug #5 fix: pulls every address-looking token out of a free-text message,
+ * not just the first one. A message with three addresses in it now yields
+ * three candidates, in the order they appeared, with no duplicates. This is
+ * intentionally loose about what counts as a candidate — the LLM intent
+ * layer / classifyAddress decide what to actually do with each one; this
+ * just finds every plausible string.
+ */
+export function extractAddressCandidates(text: string): string[] {
+  const tokens = text.split(/\s+/);
+  const found: string[] = [];
+  const seen = new Set<string>();
+
+  for (const token of tokens) {
+    const cleaned = token.replace(/^[("'`]+/, "").replace(/[.,!?)"'`]+$/, "");
+    if (cleaned && classifyAddress(cleaned).kind !== "none" && !seen.has(cleaned)) {
+      seen.add(cleaned);
+      found.push(cleaned);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Single-address convenience wrapper kept for anything that only ever
+ * expects one address. Prefer extractAddressCandidates for any input that
+ * might legitimately contain more than one.
  */
 export function extractAddressCandidate(text: string): string | null {
-  const tokens = text.split(/\s+/);
-  for (const token of tokens) {
-    const cleaned = token.replace(/[.,!?]+$/, "");
-    if (classifyAddress(cleaned).kind !== "none") return cleaned;
-  }
-  return null;
+  return extractAddressCandidates(text)[0] ?? null;
 }
