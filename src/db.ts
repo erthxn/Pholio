@@ -1,7 +1,21 @@
+import fs from "node:fs";
+import path from "node:path";
 import pg from "pg";
 import { config } from "./config.js";
 
 const pool = new pg.Pool({ connectionString: config.databaseUrl });
+
+/**
+ * Creates the schema if it doesn't already exist. Safe to call on every
+ * boot, the SQL uses CREATE TABLE IF NOT EXISTS, so this is a no-op once
+ * the tables are there. Called automatically at startup in index.ts so
+ * nobody ever has to run a manual migration command by hand.
+ */
+export async function ensureSchema(): Promise<void> {
+  const schemaPath = path.join(process.cwd(), "db", "schema.sql");
+  const sql = fs.readFileSync(schemaPath, "utf8");
+  await pool.query(sql);
+}
 
 export interface StoredUser {
   id: number;
