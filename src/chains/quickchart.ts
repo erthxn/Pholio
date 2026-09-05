@@ -36,3 +36,39 @@ export function buildMomentumChartUrl(params: { symbol: string; changes: ChangeP
 
   return `https://quickchart.io/chart?w=600&h=350&bkg=white&c=${encodeURIComponent(JSON.stringify(config))}`;
 }
+
+/**
+ * Chart for "give me a chart" on a wallet scan, not just a token contract.
+ * Only ever fed holdings that already came back with a real USD price from
+ * the chain API (see extractTonJettonHoldings in tonapi.ts) — nothing here
+ * estimates a price, it just visualizes numbers that are already real.
+ */
+export interface HoldingPoint {
+  label: string;
+  usdValue: number;
+}
+
+export function buildHoldingsChartUrl(params: { title: string; holdings: HoldingPoint[] }): string {
+  const config = {
+    type: "bar",
+    data: {
+      labels: params.holdings.map((h) => h.label),
+      datasets: [
+        {
+          label: "USD value",
+          data: params.holdings.map((h) => Number(h.usdValue.toFixed(2))),
+          backgroundColor: "#3b82f6",
+        },
+      ],
+    },
+    options: {
+      indexAxis: "y",
+      plugins: {
+        legend: { display: false },
+        title: { display: true, text: params.title },
+      },
+    },
+  };
+
+  return `https://quickchart.io/chart?w=600&h=400&bkg=white&c=${encodeURIComponent(JSON.stringify(config))}`;
+}
