@@ -3,6 +3,7 @@
 // Replies / Attachments docs — app.messages is an async-iterable stream of
 // [space, message] tuples; you narrow message.content.type and act on it
 // via space.send(...) or message.reply(...).
+import fs from "node:fs/promises";
 import { Spectrum, text, attachment } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { config } from "./config.js";
@@ -12,6 +13,10 @@ import { ensureSchema, ensureUser, isFirstEverMessage, saveMessage, getRecentMes
 import { buildWelcome, STICKERS } from "./handlers/onboarding.js";
 import { detectIntent } from "./handlers/intent.js";
 import { startScan, runScan } from "./handlers/scan.js";
+import { buildChartOutcome } from "./handlers/chart.js";
+import { findChainMentions } from "./chains/aliases.js";
+import { buildInitialAsk, buildNudge, explainOffListChain, buildGiveUp } from "./handlers/chainChoicePhrasing.js";
+import { sanitizeForIMessage } from "./utils/sanitize.js";
 import { askPholio } from "./ai/gemini.js";
 import type { ChainKey } from "./chains/types.js";
 
@@ -25,14 +30,68 @@ const app = await Spectrum({
   providers: [imessage.config()],
 });
 
-
 // Waiting-on-a-chain-choice state, keyed by our internal user id. In-memory
 // is fine for a single-process deploy; move to the DB if you ever run more
 // than one instance, since this won't survive a restart or be shared.
-const pendingChainChoice = new Map<number, { address: string; candidates: ChainKey[] }>();
+// `remaining` carries any other addresses from the same message (bug #5) so
+// a multi-address request keeps going once this one chain is resolved.
+// `attempts` powers bug #3's "explain once, then stop looping" behavior.
+interface PendingChoice {
+  address: string;
+  candidates: ChainKey[];
+  remaining: string[];
+  attempts: number;
+}
+const pendingChainChoice = new Map<number, PendingChoice>();
+const MAX_CHAIN_ATTEMPTS = 2;
 
 // Per-space "go quiet" flag for the natural-language "stop replying" ask.
 const quietSpaces = new Set<string>();
+
+/** Every outgoing text bubble goes through here: sanitized, sent, then saved to history. */
+async function sendReply(space: { send: (c: unknown) => Promise<unknown> }, user: StoredUser, content: string): Promise<void> {
+  const clean = sanitizeForIMessage(content);
+  await space.send(text(clean));
+  await saveMessage(user.id, "assistant", clean);
+}
+
+/**
+ * Runs (or starts) a scan for each address in order (bug #5). If an address
+ * needs a chain choice, this stops and waits, stashing whatever addresses
+ * hadn't been processed yet in `remaining` so they pick back up once the
+ * person answers.
+ */
+async function processScanQueue(
+  space: { send: (c: unknown) => Promise<unknown> },
+  user: StoredUser,
+  addresses: string[]
+): Promise<void> {
+  for (let i = 0; i < addresses.length; i++) {
+    const address = addresses[i];
+    const scanState = await startScan(address);
+
+    if (scanState.kind === "needs-chain-choice") {
+      pendingChainChoice.set(user.id, {
+        address: scanState.address,
+        candidates: scanState.candidates,
+        remaining: addresses.slice(i + 1),
+        attempts: 0,
+      });
+      await sendReply(space, user, buildInitialAsk(scanState.candidates));
+      return;
+    }
+
+    if (scanState.kind === "unique") {
+      await space.send(attachment(STICKERS.readingData));
+      const outcome = await runScan({ userId: user.id, address, chain: scanState.chain });
+      await sendReply(space, user, outcome.reply);
+      continue;
+    }
+
+    // "failed" classification — didn't match any known address format
+    await sendReply(space, user, scanState.reply);
+  }
+}
 
 for await (const [space, message] of app.messages) {
   if (message.direction === "outbound") continue;
@@ -61,9 +120,9 @@ for await (const [space, message] of app.messages) {
     try {
       if (firstTime) {
         const { greeting, followUp } = await buildWelcome();
-        await space.send(text(greeting));
+        await space.send(text(sanitizeForIMessage(greeting)));
         await space.send(attachment(STICKERS.welcome));
-        await space.send(text(followUp));
+        await space.send(text(sanitizeForIMessage(followUp)));
         await saveMessage(user.id, "assistant", `${greeting}\n${followUp}`);
         return;
       }
@@ -73,18 +132,38 @@ for await (const [space, message] of app.messages) {
       // Mid-way through "which chain did you mean?"
       const pending = pendingChainChoice.get(user.id);
       if (pending) {
-        const chosen = pending.candidates.find((c) => incomingText.toLowerCase().includes(c));
+        const mentioned = findChainMentions(incomingText);
+        const chosen = pending.candidates.find((c) => mentioned.includes(c));
+
         if (chosen) {
           pendingChainChoice.delete(user.id);
           await space.send(attachment(STICKERS.readingData));
           const outcome = await runScan({ userId: user.id, address: pending.address, chain: chosen });
-          await space.send(text(outcome.reply));
-          await saveMessage(user.id, "assistant", outcome.reply);
+          await sendReply(space, user, outcome.reply);
+          if (pending.remaining.length > 0) {
+            await processScanQueue(space, user, pending.remaining);
+          }
           return;
         }
-        const nudge = `which one did you mean — ${pending.candidates.join(", ")}?`;
-        await space.send(text(nudge));
-        await saveMessage(user.id, "assistant", nudge);
+
+        // Bug #3: don't just loop the same question forever. Explain plainly
+        // once (twice at most) and then let the conversation move on.
+        const attempts = pending.attempts + 1;
+        if (attempts > MAX_CHAIN_ATTEMPTS) {
+          pendingChainChoice.delete(user.id);
+          await sendReply(space, user, buildGiveUp(pending.candidates, attempts));
+          if (pending.remaining.length > 0) {
+            await processScanQueue(space, user, pending.remaining);
+          }
+          return;
+        }
+
+        pending.attempts = attempts;
+        const otherChain = mentioned[0]; // a real chain we track, just not one of the candidates here
+        const reply = otherChain
+          ? explainOffListChain(otherChain, pending.candidates)
+          : buildNudge(pending.candidates, attempts);
+        await sendReply(space, user, reply);
         return;
       }
 
@@ -92,9 +171,7 @@ for await (const [space, message] of app.messages) {
 
       if (intent.kind === "wipe-memory") {
         await wipeMemory(user.id);
-        const reply = "wiped — clean slate. what do you want to do?";
-        await space.send(text(reply));
-        await saveMessage(user.id, "assistant", reply);
+        await sendReply(space, user, "wiped, clean slate. what do you want to do?");
         return;
       }
 
@@ -105,27 +182,20 @@ for await (const [space, message] of app.messages) {
       }
 
       if (intent.kind === "scan") {
-        const scanState = await startScan(intent.address);
+        await processScanQueue(space, user, intent.addresses);
+        return;
+      }
 
-        if (scanState.kind === "needs-chain-choice") {
-          pendingChainChoice.set(user.id, { address: scanState.address, candidates: scanState.candidates });
-          const ask = `that address is active on a few chains — ${scanState.candidates.join(", ")}. which one did you mean?`;
-          await space.send(text(ask));
-          await saveMessage(user.id, "assistant", ask);
+      if (intent.kind === "chart") {
+        await space.send(attachment(STICKERS.readingData));
+        const outcome = await buildChartOutcome(intent.address);
+        if (outcome.kind === "failed") {
+          await sendReply(space, user, outcome.reply);
           return;
         }
-
-        if (scanState.kind === "unique") {
-          await space.send(attachment(STICKERS.readingData));
-          const outcome = await runScan({ userId: user.id, address: intent.address, chain: scanState.chain });
-          await space.send(text(outcome.reply));
-          await saveMessage(user.id, "assistant", outcome.reply);
-          return;
-        }
-
-        // "failed" classification — didn't match any known address format
-        await space.send(text(scanState.reply));
-        await saveMessage(user.id, "assistant", scanState.reply);
+        await space.send(attachment(outcome.filePath));
+        await sendReply(space, user, outcome.caption);
+        await fs.rm(outcome.filePath, { force: true }).catch(() => {});
         return;
       }
 
@@ -135,8 +205,7 @@ for await (const [space, message] of app.messages) {
         history.slice(0, -1).map((m) => ({ role: m.role, content: m.content })),
         incomingText
       );
-      await space.send(text(reply));
-      await saveMessage(user.id, "assistant", reply);
+      await sendReply(space, user, reply);
     } catch (err) {
       // A failure here used to crash the whole process, taking down every
       // other conversation with it. Log it, tell this user plainly, and
