@@ -1,20 +1,22 @@
 // Entry point: wires Photon's Spectrum iMessage provider to Pholio's logic.
-// Built against Photon's confirmed Messages / Spaces & Users / Reactions &
-// Replies / Attachments docs — app.messages is an async-iterable stream of
-// [space, message] tuples; you narrow message.content.type and act on it
-// via space.send(...) or message.reply(...).
 import fs from "node:fs/promises";
-import { Spectrum, text, attachment, Emoji } from "spectrum-ts";
+import path from "node:path";
+import { Spectrum, text, markdown, attachment } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { config } from "./config.js";
 import { startHealthServer } from "./server.js";
 import { loadProjectKnowledge } from "./ai/knowledge.js";
 import { ensureSchema, ensureUser, isFirstEverMessage, saveMessage, getRecentMessages, wipeMemory, type StoredUser } from "./db.js";
 import { buildWelcome, STICKERS } from "./handlers/onboarding.js";
+import { buildGreetingReply, buildIdentityReply } from "./handlers/persona.js";
 import { detectIntent } from "./handlers/intent.js";
-import { startScan, runScan } from "./handlers/scan.js";
+import { startScan, runScan, type ScanOutcome } from "./handlers/scan.js";
 import { buildChartOutcome } from "./handlers/chart.js";
-import { findChainMentions } from "./chains/aliases.js";
+import { buildMarketOutcome } from "./handlers/market.js";
+import { buildPortfolioMix } from "./chains/portfolioMix.js";
+import { buildPortfolioMixChartUrl } from "./chains/quickchart.js";
+import { extractTopTransactions, buildPortfolioReportMarkdown } from "./handlers/report.js";
+import { findChainMentions, CHAIN_LABELS } from "./chains/aliases.js";
 import { buildInitialAsk, buildNudge, explainOffListChain, buildGiveUp } from "./handlers/chainChoicePhrasing.js";
 import { sanitizeForIMessage } from "./utils/sanitize.js";
 import { askPholio } from "./ai/gemini.js";
@@ -30,12 +32,6 @@ const app = await Spectrum({
   providers: [imessage.config()],
 });
 
-// Waiting-on-a-chain-choice state, keyed by our internal user id. In-memory
-// is fine for a single-process deploy; move to the DB if you ever run more
-// than one instance, since this won't survive a restart or be shared.
-// `remaining` carries any other addresses from the same message (bug #5) so
-// a multi-address request keeps going once this one chain is resolved.
-// `attempts` powers bug #3's "explain once, then stop looping" behavior.
 interface PendingChoice {
   address: string;
   candidates: ChainKey[];
@@ -45,14 +41,14 @@ interface PendingChoice {
 const pendingChainChoice = new Map<number, PendingChoice>();
 const MAX_CHAIN_ATTEMPTS = 2;
 
-// Per-space "go quiet" flag for the natural-language "stop replying" ask.
 const quietSpaces = new Set<string>();
 
-/** Every outgoing text bubble goes through here: sanitized, sent, then saved to history. */
-// `space` is typed as `any` here rather than a hand-rolled shape: space.send
-// is a real overloaded function (ContentInput | ReactionBuilder | ...), and
-// a narrower `(c: unknown) => Promise<unknown>` doesn't structurally match
-// that, TypeScript rejects it as a contravariant parameter mismatch.
+const APPRECIATION_REPLIES = ["anytime.", "you got it.", "always down to dig into a wallet.", "glad it helped."];
+function pick<T>(options: T[]): T {
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+/** Plain conversational text: sanitized against stray markdown/dashes, sent, then saved to history. */
 async function sendReply(space: any, user: StoredUser, content: string): Promise<void> {
   const clean = sanitizeForIMessage(content);
   await space.send(text(clean));
@@ -60,16 +56,72 @@ async function sendReply(space: any, user: StoredUser, content: string): Promise
 }
 
 /**
- * Runs (or starts) a scan for each address in order (bug #5). If an address
- * needs a chain choice, this stops and waits, stashing whatever addresses
- * hadn't been processed yet in `remaining` so they pick back up once the
- * person answers.
+ * The structured portfolio report is sent as real styled iMessage content
+ * (bold, monospace, tappable links), so it deliberately bypasses the plain
+ * text sanitizer, that sanitizer exists to strip exactly the symbols this
+ * message needs in order to render correctly.
  */
-async function processScanQueue(
-  space: any,
-  user: StoredUser,
-  addresses: string[]
-): Promise<void> {
+async function sendMarkdownReply(space: any, user: StoredUser, content: string): Promise<void> {
+  await space.send(markdown(content));
+  await saveMessage(user.id, "assistant", content);
+}
+
+async function sendChartFile(space: any, filePath: string): Promise<void> {
+  await space.send(attachment(filePath));
+  await fs.rm(filePath, { force: true }).catch(() => {});
+}
+
+/** Fetches a QuickChart URL to a temp PNG file, same pattern used by every chart in this project. */
+async function downloadChart(url: string, prefix: string): Promise<string | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`[chart] QuickChart responded ${res.status} for ${prefix}`);
+      return null;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const filePath = path.join("/tmp", `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+    await fs.writeFile(filePath, buf);
+    return filePath;
+  } catch (err) {
+    console.error(`[chart] failed to download chart for ${prefix}`, err);
+    return null;
+  }
+}
+
+/**
+ * The 3-message portfolio result: a composition pie chart (native vs.
+ * stablecoins vs. other, only for whatever was actually priced), then the
+ * structured report (bold sections, tappable "View Scan" links, closing
+ * with the plain-English read). No sticker, the chart and report carry the
+ * visual weight now.
+ */
+async function presentScanResult(space: any, user: StoredUser, address: string, outcome: Extract<ScanOutcome, { kind: "result" }>): Promise<void> {
+  const mix = await buildPortfolioMix(outcome.chain, outcome.raw);
+
+  if (mix.categories.length > 0) {
+    const chartUrl = buildPortfolioMixChartUrl({ title: `${address} composition`, slices: mix.categories });
+    const filePath = await downloadChart(chartUrl, "portfolio-mix");
+    if (filePath) await sendChartFile(space, filePath);
+  }
+
+  const txLines = extractTopTransactions(outcome.chain, outcome.raw);
+  const report = buildPortfolioReportMarkdown({
+    address,
+    chain: CHAIN_LABELS[outcome.chain],
+    mix,
+    txLines,
+    summary: outcome.reply,
+  });
+  await sendMarkdownReply(space, user, report);
+}
+
+/**
+ * Runs (or starts) a scan for each address in order. If an address needs a
+ * chain choice, this stops and waits, stashing whatever addresses hadn't
+ * been processed yet in `remaining` so they pick back up once the person answers.
+ */
+async function processScanQueue(space: any, user: StoredUser, addresses: string[]): Promise<void> {
   for (let i = 0; i < addresses.length; i++) {
     const address = addresses[i];
     const scanState = await startScan(address);
@@ -86,18 +138,16 @@ async function processScanQueue(
     }
 
     if (scanState.kind === "unique") {
-      await sendReply(space, user, `Scanning ${address} now.`);
-      await space.send(attachment(STICKERS.readingData));
+      await sendReply(space, user, `sit tight, reading ${address}.`);
       const outcome = await runScan({ userId: user.id, address, chain: scanState.chain });
-      if (outcome.kind === "result" && outcome.chartFilePath) {
-        await space.send(attachment(outcome.chartFilePath));
-        await fs.rm(outcome.chartFilePath, { force: true }).catch(() => {});
+      if (outcome.kind === "result") {
+        await presentScanResult(space, user, address, outcome);
+      } else {
+        await sendReply(space, user, outcome.reply);
       }
-      await sendReply(space, user, outcome.reply);
       continue;
     }
 
-    // "failed" classification — didn't match any known address format
     await sendReply(space, user, scanState.reply);
   }
 }
@@ -105,27 +155,16 @@ async function processScanQueue(
 for await (const [space, message] of app.messages) {
   if (message.direction === "outbound") continue;
   if (quietSpaces.has(space.id)) continue;
-  if (message.content.type !== "text") continue; // ignore non-text content for now
+  if (message.content.type !== "text") continue;
 
   const incomingText = message.content.text;
-  const senderId = message.sender?.id ?? space.id; // fall back to space id if the platform can't attribute a sender
+  const senderId = message.sender?.id ?? space.id;
   console.log(`[message] from ${senderId} in space ${space.id}: ${incomingText}`);
 
-  // Mark it read and drop a quick reaction so there's visible acknowledgement
-  // in the thread the moment we've got the message, before any of the
-  // (possibly slow) scan/chart/AI work below even starts. Both are
-  // fire-and-forget and no-op silently on platforms that don't support them,
-  // per Photon's Read / Reactions docs, so a failure here never blocks a
-  // reply from going out.
   try {
     await message.read();
   } catch (err) {
     console.error("Error marking message read:", err);
-  }
-  try {
-    await message.react(Emoji.like);
-  } catch (err) {
-    console.error("Error reacting to message:", err);
   }
 
   let user: StoredUser;
@@ -148,7 +187,7 @@ for await (const [space, message] of app.messages) {
       if (firstTime) {
         const { greeting, followUp } = await buildWelcome();
         await space.send(text(sanitizeForIMessage(greeting)));
-        await space.send(attachment(STICKERS.welcome));
+        await space.send(attachment(STICKERS.intro));
         await space.send(text(sanitizeForIMessage(followUp)));
         await saveMessage(user.id, "assistant", `${greeting}\n${followUp}`);
         return;
@@ -164,22 +203,24 @@ for await (const [space, message] of app.messages) {
 
         if (chosen) {
           pendingChainChoice.delete(user.id);
-          await sendReply(space, user, `Scanning ${pending.address} now.`);
-          await space.send(attachment(STICKERS.readingData));
-          const outcome = await runScan({ userId: user.id, address: pending.address, chain: chosen });
-          if (outcome.kind === "result" && outcome.chartFilePath) {
-            await space.send(attachment(outcome.chartFilePath));
-            await fs.rm(outcome.chartFilePath, { force: true }).catch(() => {});
+          try {
+            await message.react("📑");
+          } catch (err) {
+            console.error("Error reacting to message:", err);
           }
-          await sendReply(space, user, outcome.reply);
+          await sendReply(space, user, `sit tight, reading ${pending.address}.`);
+          const outcome = await runScan({ userId: user.id, address: pending.address, chain: chosen });
+          if (outcome.kind === "result") {
+            await presentScanResult(space, user, pending.address, outcome);
+          } else {
+            await sendReply(space, user, outcome.reply);
+          }
           if (pending.remaining.length > 0) {
             await processScanQueue(space, user, pending.remaining);
           }
           return;
         }
 
-        // Bug #3: don't just loop the same question forever. Explain plainly
-        // once (twice at most) and then let the conversation move on.
         const attempts = pending.attempts + 1;
         if (attempts > MAX_CHAIN_ATTEMPTS) {
           pendingChainChoice.delete(user.id);
@@ -191,7 +232,7 @@ for await (const [space, message] of app.messages) {
         }
 
         pending.attempts = attempts;
-        const otherChain = mentioned[0]; // a real chain we track, just not one of the candidates here
+        const otherChain = mentioned[0];
         const reply = otherChain
           ? explainOffListChain(otherChain, pending.candidates)
           : buildNudge(pending.candidates, attempts);
@@ -200,6 +241,18 @@ for await (const [space, message] of app.messages) {
       }
 
       const intent = detectIntent(incomingText);
+
+      // Reactions are deliberately scoped to specific intents, not fired on
+      // every message, a request to scan a portfolio gets 📑, a request for
+      // live market info gets ⏳, appreciation gets ❤️, everything else gets
+      // no reaction at all.
+      try {
+        if (intent.kind === "scan") await message.react("📑");
+        else if (intent.kind === "chart" || intent.kind === "market") await message.react("⏳");
+        else if (intent.kind === "appreciation") await message.react("❤️");
+      } catch (err) {
+        console.error("Error reacting to message:", err);
+      }
 
       if (intent.kind === "wipe-memory") {
         await wipeMemory(user.id);
@@ -213,6 +266,24 @@ for await (const [space, message] of app.messages) {
         return;
       }
 
+      if (intent.kind === "appreciation") {
+        await sendReply(space, user, pick(APPRECIATION_REPLIES));
+        return;
+      }
+
+      if (intent.kind === "identity") {
+        const reply = await buildIdentityReply();
+        await space.send(attachment(STICKERS.intro));
+        await sendReply(space, user, reply);
+        return;
+      }
+
+      if (intent.kind === "greeting") {
+        const reply = await buildGreetingReply();
+        await sendReply(space, user, reply);
+        return;
+      }
+
       if (intent.kind === "scan") {
         await processScanQueue(space, user, intent.addresses);
         return;
@@ -220,8 +291,6 @@ for await (const [space, message] of app.messages) {
 
       if (intent.kind === "chart") {
         console.log(`[chart] building price chart for ${intent.address}`);
-        await sendReply(space, user, `Scanning ${intent.address} now.`);
-        await space.send(attachment(STICKERS.readingData));
         const outcome = await buildChartOutcome(intent.address);
         if (outcome.kind === "failed") {
           console.error(`[chart] failed for ${intent.address}: ${outcome.reply}`);
@@ -229,29 +298,46 @@ for await (const [space, message] of app.messages) {
           return;
         }
         console.log(`[chart] built chart for ${intent.address}`);
-        await space.send(attachment(outcome.filePath));
+        await sendChartFile(space, outcome.filePath);
         await sendReply(space, user, outcome.caption);
-        await fs.rm(outcome.filePath, { force: true }).catch(() => {});
         return;
       }
 
-      // Ordinary conversation — answer with recent memory as context.
+      if (intent.kind === "market") {
+        console.log(`[market] building market snapshot for ${intent.chain}`);
+        const outcome = await buildMarketOutcome(intent.chain);
+        if (outcome.kind === "failed") {
+          await sendReply(space, user, outcome.reply);
+          return;
+        }
+        await sendChartFile(space, outcome.filePath);
+        await sendReply(space, user, outcome.caption);
+        return;
+      }
+
+      // Ordinary conversation, answer with recent memory as context. A
+      // genuinely absurd/impossible ask comes back prefixed with a hidden
+      // "[WTF]" marker (see personality.ts), stripped here and swapped for
+      // the wtf sticker instead of shown to the person.
       console.log(`[chat] no address/command detected, answering conversationally`);
       const history = await getRecentMessages(user.id, 20);
-      const reply = await askPholio(
+      let reply = await askPholio(
         history.slice(0, -1).map((m) => ({ role: m.role, content: m.content })),
         incomingText
       );
+
+      const isWtf = reply.startsWith("[WTF]");
+      if (isWtf) {
+        reply = reply.replace(/^\[WTF\]\s*/, "");
+        await space.send(attachment(STICKERS.wtf));
+      }
       await sendReply(space, user, reply);
     } catch (err) {
-      // A failure here used to crash the whole process, taking down every
-      // other conversation with it. Log it, tell this user plainly, and
-      // keep the process alive for everyone else.
       console.error("Error handling message:", err);
       try {
         await space.send(text("hit a snag on my end, try that again in a moment."));
       } catch {
-        // If even sending the error message fails, there's nothing more to do here.
+        // nothing more to do if even this fails
       }
     }
   });
