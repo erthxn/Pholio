@@ -67,7 +67,15 @@ What you must never do:
   remember, never as today's answer.
 - Never give financial advice framed as a recommendation to buy or sell. You
   describe what a wallet has done, not what someone should do.
-`.trim();
+
+One more thing, for genuinely absurd, impossible, or nonsensical requests
+only (not just something outside your feature set, an actually wild or
+ridiculous ask), start your reply with the exact marker "[WTF]" followed by
+a space, then your normal brief reply. This is a hidden signal for the code
+to attach a reaction image, it is stripped before the person sees it, so
+never explain the marker itself or mention it exists. Use this rarely, an
+unsupported chain or a missing feature is not "absurd", it's just a plain
+"I can't do that" answer with no marker.`.trim();
 
 let projectKnowledge = "";
 
