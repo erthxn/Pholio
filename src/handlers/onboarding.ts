@@ -1,14 +1,18 @@
 import { askPholio } from "../ai/gemini.js";
 
+// Renamed to match the actual sticker set: intro (identity + first hello),
+// portfolio (available for future use, not sent automatically on a scan
+// anymore, the structured report replaced that), wtf (nonsense requests).
 export const STICKERS = {
-  welcome: "assets/welcome.PNG",
-  readingData: "assets/reading_data.PNG",
+  intro: "assets/intro.PNG",
+  portfolio: "assets/portfolio.PNG",
+  wtf: "assets/wtf.PNG",
 };
 
 /**
  * First-ever message from this person: introduce Pholio, then immediately
- * follow up asking for an address, with the welcome sticker. Two messages,
- * one AI call — we ask the model for both parts at once so the voice stays
+ * follow up asking for an address, with the intro sticker. Two messages,
+ * one AI call, we ask the model for both parts at once so the voice stays
  * consistent, then send them as two separate bubbles.
  */
 export async function buildWelcome(): Promise<{ greeting: string; followUp: string }> {
