@@ -72,3 +72,71 @@ export function buildHoldingsChartUrl(params: { title: string; holdings: Holding
 
   return `https://quickchart.io/chart?w=600&h=400&bkg=white&c=${encodeURIComponent(JSON.stringify(config))}`;
 }
+
+/**
+ * Portfolio composition pie, native asset vs. stablecoins vs. everything
+ * else. Fed only by categories that actually have a real priced USD value
+ * (see portfolioMix.ts), a category with nothing priced in it is just
+ * omitted rather than shown as zero.
+ */
+export interface MixSlice {
+  label: string;
+  usdValue: number;
+}
+
+export function buildPortfolioMixChartUrl(params: { title: string; slices: MixSlice[] }): string {
+  const config = {
+    type: "pie",
+    data: {
+      labels: params.slices.map((s) => s.label),
+      datasets: [
+        {
+          data: params.slices.map((s) => Number(s.usdValue.toFixed(2))),
+          backgroundColor: ["#3b82f6", "#16c784", "#f59e0b", "#a855f7", "#ea3943"],
+        },
+      ],
+    },
+    options: {
+      plugins: {
+        title: { display: true, text: params.title },
+      },
+    },
+  };
+
+  return `https://quickchart.io/chart?w=500&h=500&bkg=white&c=${encodeURIComponent(JSON.stringify(config))}`;
+}
+
+/** A real 24h price line for a chain-level "what's happening in X" question. */
+export interface PricePoint {
+  x: number;
+  y: number;
+}
+
+export function buildPriceLineChartUrl(params: { label: string; points: PricePoint[] }): string {
+  const config = {
+    type: "line",
+    data: {
+      datasets: [
+        {
+          label: `${params.label} price (USD)`,
+          data: params.points,
+          borderColor: "#3b82f6",
+          backgroundColor: "rgba(59,130,246,0.15)",
+          fill: true,
+          pointRadius: 0,
+          tension: 0.2,
+        },
+      ],
+    },
+    options: {
+      scales: {
+        x: { type: "time", time: { unit: "hour" } },
+      },
+      plugins: {
+        title: { display: true, text: `${params.label}, last 24h` },
+      },
+    },
+  };
+
+  return `https://quickchart.io/chart?w=600&h=350&bkg=white&version=3&c=${encodeURIComponent(JSON.stringify(config))}`;
+}
