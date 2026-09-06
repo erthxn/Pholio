@@ -21,14 +21,20 @@ async function blockscoutGet(chainKey: keyof typeof CHAIN_IDS, addressPath: stri
   return res.json();
 }
 
-/** Fetches balance + recent activity for one EVM chain. */
+/** Fetches balance, recent activity, and priced token holdings for one EVM chain. */
 export async function fetchEvmChain(chain: ChainKey, address: string): Promise<ScanResult> {
   try {
-    const [overview, txs] = await Promise.all([
+    const [overview, txs, tokensRes] = await Promise.all([
       blockscoutGet(chain as keyof typeof CHAIN_IDS, address),
       blockscoutGet(chain as keyof typeof CHAIN_IDS, `${address}/transactions`),
+      blockscoutGet(chain as keyof typeof CHAIN_IDS, `${address}/token-balances`).catch((err) => {
+        // Additive on top of the core read, if this one call fails, don't
+        // fail the whole scan over it, just say so plainly downstream.
+        console.error(`[blockscout] token-balances for ${address} on ${chain} failed`, err);
+        return null;
+      }),
     ]);
-    return { chain, address, ok: true, data: { overview, txs } };
+    return { chain, address, ok: true, data: { overview, txs, tokenBalances: tokensRes } };
   } catch (err) {
     return { chain, address, ok: false, error: (err as Error).message };
   }
